@@ -49,7 +49,7 @@ All experiment pipelines conducted in this work are located in the run/exp_offlo
 
 For example, to evaluate SubSpec on Qwen2.5 7B Instruct on MT-Bench and GSM8K, run:
 ```bash
-bash run.sh run.exp_offload.subspec_sd_qwen_7b run-benchmark --benchmarks mt-bench,gsm8k --max-samples 20
+bash run.sh run.exp_offloading.subspec_sd_qwen_7b run-benchmark --benchmarks mt-bench,gsm8k --max-samples 20
 ```
 
 There are a total of 9 selectable benchmarks:
