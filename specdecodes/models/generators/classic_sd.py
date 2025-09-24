@@ -247,6 +247,9 @@ class ClassicSDGeneratorBase(GeneratorBase):
                 with nvtx.annotate("speculate", color="cyan"):
                     input_ids = input_ids.clone(memory_format=torch.contiguous_format)
                     tree = self._speculate(input_ids)
+                    if self.cache_implementation == 'dynamic':
+                        _, input_len = input_ids.shape
+                        draft_past_key_values.crop(input_len)
 
                 # * tree decoding
                 with nvtx.annotate("tree_decoding", color="orange"):

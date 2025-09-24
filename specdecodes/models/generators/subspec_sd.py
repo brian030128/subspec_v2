@@ -123,6 +123,8 @@ class SubSpecSDGeneratorBase(ClassicSDGeneratorBase):
                 # * tree decoding
                 with nvtx.annotate("tree_decoding", color="orange"):
                     prev_kv_len = past_key_values.get_seq_length()
+                    if self.cache_implementation == 'dynamic':
+                        past_key_values.crop(prev_kv_len)
                     outputs = self._tree_decoding(tree, tree_mask, past_key_values, position_offset=input_ids.shape[1]-1, cache_position=cache_position, device=input_ids.device)
                     next_token_logits = outputs.logits
                     del outputs

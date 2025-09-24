@@ -1,6 +1,6 @@
 import torch
 from run.app_router import run_app
-from subspec.run.subspec_sd import SubSpecSDBuilder
+from run.subspec_sd import SubSpecSDBuilder
 from specdecodes.models.utils.utils import DraftParams
 
 from specdecodes.helpers.recipes.subspec.hqq_4bit_attn_4bit_mlp import Recipe

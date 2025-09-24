@@ -32,15 +32,13 @@ class TreeDynamicCache(DynamicCache):
     def get_seq_length(self) -> int:
         return self.seq_len
         
-    def crop(self, start: int, end = None, dim=0):
+    def crop(self, start: int, end: Optional[int] = None, dim: int = 2) -> None:
         """Crop the past key/values up to a new `max_length` (negative removes from the end)."""
-        if end is None:
-            end = self.get_seq_length()
-            
-        if start < 0:
-            start = end - abs(start)
-        if end <= start:
-            return
+        if end is not None:
+            if start < 0:
+                start = end - abs(start)
+            if end <= start:
+                return
 
         self._seen_tokens = start
         for i in range(len(self.key_cache)):

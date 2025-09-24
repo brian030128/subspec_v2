@@ -166,6 +166,9 @@ class EagleSDGeneratorBase(ClassicSDGeneratorBase):
                 # * speculate
                 with nvtx.annotate("speculate", color="cyan"):
                     tree = self._speculate(input_ids, hidden_states)
+                    if self.cache_implementation == 'dynamic':
+                        _, input_len = input_ids.shape
+                        draft_past_key_values.crop(input_len-1)
 
                 # * tree decoding
                 with nvtx.annotate("tree_decoding", color="orange"):
