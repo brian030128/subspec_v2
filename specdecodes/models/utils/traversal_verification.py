@@ -18,8 +18,6 @@ def traversal_verification_tree(
     """
     Optimized Traversal Verification using flat tensor operations.
     """
-
-    print("Starting traversal verification...")
     device = logits.device  # Usually CPU for these tree operations
     dtype = torch.float32
     eps = 1e-8
