@@ -19,6 +19,7 @@ def verify_tree(
     lossy: bool = False,
     lossy_threshold: float = 0.0,
     lossy_window_size: int = 1,
+    use_traversal_verification: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[int, int]]:
     """Verify a speculative draft tree against target logits.
 
@@ -42,17 +43,18 @@ def verify_tree(
       hidden_indices: (L,) (indices into the original tree indexing)
       (total_len, accept_len): metrics (accept_len excludes bonus token)
     """
-    return traversal_verification_tree(
-        tree = tree,
-        root_ind = root_ind,
-        logits = logits,
-        sample_token_fn = sample_token_fn,
-        verify_step_fn = verify_step_fn,
-        eos_token_id = eos_token_id,
-        logits_processor = logits_processor,
-        do_sample = do_sample,
-        skip_nodes = skip_nodes,
-    )
+    if use_traversal_verification:
+        return traversal_verification_tree(
+            tree = tree,
+            root_ind = root_ind,
+            logits = logits,
+            sample_token_fn = sample_token_fn,
+            verify_step_fn = verify_step_fn,
+            eos_token_id = eos_token_id,
+            logits_processor = logits_processor,
+            do_sample = do_sample,
+            skip_nodes = skip_nodes,
+        )
 
     if not lossy:
         # ---- Exact verifier (existing behavior) ----
