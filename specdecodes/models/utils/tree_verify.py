@@ -2,7 +2,7 @@ import torch
 from typing import Optional, Tuple
 
 from .lossy_tree_verify import lossy_bottom_up_verify
-
+from .traversal_verification import traversal_verification_tree
 
 @torch.no_grad()
 def verify_tree(
@@ -42,6 +42,17 @@ def verify_tree(
       hidden_indices: (L,) (indices into the original tree indexing)
       (total_len, accept_len): metrics (accept_len excludes bonus token)
     """
+    return traversal_verification_tree(
+        tree = tree,
+        root_ind = root_ind,
+        logits = logits,
+        sample_token_fn = sample_token_fn,
+        verify_step_fn = verify_step_fn,
+        eos_token_id = eos_token_id,
+        logits_processor = logits_processor,
+        do_sample = do_sample,
+        skip_nodes = skip_nodes,
+    )
 
     if not lossy:
         # ---- Exact verifier (existing behavior) ----
