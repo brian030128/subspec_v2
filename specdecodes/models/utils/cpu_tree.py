@@ -8,7 +8,13 @@ class TreeNode:
         'depth',
         'token_id',
         'cumulative_probability',
-        'has_been_sampled'
+        'has_been_sampled',
+        # Fields for traversal verification
+        'p_alpha_ini',
+        'p_alpha',
+        'M_b',
+        'M_s',
+        'is_deleted'
     )
 
     def __init__(
@@ -24,6 +30,12 @@ class TreeNode:
         self.token_id = token_id
         self.cumulative_probability = cumulative_probability
         self.has_been_sampled = False
+        # Initialize traversal verification fields
+        self.p_alpha_ini = 0.0
+        self.p_alpha = 0.0
+        self.M_b = {}
+        self.M_s = {}
+        self.is_deleted = False
         
     def __repr__(self):
         return f"TreeNode(token_id={self.token_id}, cumulative_probability={self.cumulative_probability:.4f}, depth={self.depth}, parent={self.parent})"

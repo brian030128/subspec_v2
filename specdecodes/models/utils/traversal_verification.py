@@ -60,12 +60,12 @@ def traversal_verification_tree(
     num_nodes = len(tree.nodes) - skip_nodes
     vocab_size = global_p.shape[1]
 
-    # 1.3 & 1.4: Add fields to TreeNode and compute distributions
+    # 1.3 & 1.4: Compute distributions for all nodes
     for node_idx in range(skip_nodes, len(tree.nodes)):
         node = tree.nodes[node_idx]
         local_idx = node_idx - skip_nodes
 
-        # Initialize new fields
+        # Reset fields (they are initialized in TreeNode.__init__)
         node.p_alpha_ini = 0.0
         node.p_alpha = 0.0
         node.M_b = {}
