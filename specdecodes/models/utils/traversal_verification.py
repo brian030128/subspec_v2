@@ -18,6 +18,8 @@ def traversal_verification_tree(
     """
     Optimized Traversal Verification using flat tensor operations.
     """
+
+    print("Starting traversal verification...")
     device = logits.device  # Usually CPU for these tree operations
     dtype = torch.float32
     eps = 1e-8
@@ -104,7 +106,7 @@ def traversal_verification_tree(
     tokens_of_non_roots = t_token_ids[non_roots]
     
     # Gather: global_p[parent_idx, token_id]
-    t_Mb_scalars[non_roots] = global_p[parents_of_non_roots, tokens_of_non_roots]
+    t_Mb_scalars[non_roots] = global_p[parents_of_non_roots, tokens_of_non_roots].to(dtype)
 
     # 2.2 Calculate M_s(node | parent) scalars
     # M_s = node.cum / parent.cum
