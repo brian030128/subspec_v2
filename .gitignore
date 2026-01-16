@@ -170,4 +170,4 @@ experiments
 old
 .ignore/
 
-*notebooks/
+/jupyter_notebooks
