@@ -1,0 +1,31 @@
+[project]
+name = "your-project-name"
+version = "0.1.0"
+description = "Project using smolagents with quantization support"
+readme = "README.md"
+requires-python = ">=3.10"
+
+dependencies = [
+    # Core
+    "smolagents[toolkit]",
+
+    # From requirements.txt
+    "transformers==4.52.3",
+    "prettytable==3.16.0",
+    "sentencepiece==0.2.0",
+    "datasets==3.6.0",
+    "nvtx==0.2.11",
+    "typer==0.15.4",
+
+    # Kernels
+    "flashinfer-python",
+
+    # Quantization
+    "hqq==0.2.6",
+    "gemlite==0.5.1.post1",
+]
+
+[tool.uv]
+# Optional but recommended
+resolution = "highest"
+

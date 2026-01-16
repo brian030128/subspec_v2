@@ -2,7 +2,7 @@ import torch
 from typing import Any, Optional, Tuple
 
 from .lossy_tree_verify import lossy_bottom_up_verify
-
+from .traversal_verification import traversal_verification_tree
 
 @torch.no_grad()
 def verify_tree(
@@ -33,7 +33,7 @@ def verify_tree(
       logits_processor: HF LogitsProcessorList (or None if do_sample=False).
       do_sample: Whether to sample target token.
       skip_nodes: Number of leading nodes skipped for this verify call (SubSpec v2 post-spec).
-    verify_method: Verification method. Supported: "exact", "lossy".
+    verify_method: Verification method. Supported: "exact", "lossy", "traversal".
         verify_kwargs: Method-specific kwargs. For lossy:
             {"threshold": float, "window_size": int, "threshold_method": "entropy"|"prob"}.
 
@@ -42,6 +42,18 @@ def verify_tree(
       hidden_indices: (L,) (indices into the original tree indexing)
       (total_len, accept_len): metrics (accept_len excludes bonus token)
     """
+    if verify_method == "traversal":
+        return traversal_verification_tree(
+            tree = tree,
+            root_ind = root_ind,
+            logits = logits,
+            sample_token_fn = sample_token_fn,
+            verify_step_fn = verify_step_fn,
+            eos_token_id = eos_token_id,
+            logits_processor = logits_processor,
+            do_sample = do_sample,
+            skip_nodes = skip_nodes,
+        )
 
     method = str(verify_method or "exact").strip().lower()
     vk: dict[str, Any] = dict(verify_kwargs or {})
