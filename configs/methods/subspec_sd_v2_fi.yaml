@@ -1,5 +1,5 @@
 # SubSpec SD (v1) example
-method: subspec_sd
+method: subspec_sd_v2_fi
 
 llm_path: meta-llama/Llama-3.1-8B-Instruct
 
@@ -9,7 +9,10 @@ recipe:
 max_length: 4096
 cache_implementation: static
 warmup_iter: 1
-compile_mode: max-autotune
+# Required for flashinfer to work correctly
+compile_mode: max-autotune-no-cudagraphs
+
+
 
 # Target sampling settings (defaults)
 do_sample: false

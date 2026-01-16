@@ -1,27 +1,58 @@
+from __future__ import annotations
+
 import sys
 import argparse
 import os
 import shutil
 from dataclasses import asdict, is_dataclass
-from typing import Any, Dict
+from typing import Any, Dict, TYPE_CHECKING
 
-# Monkey patch for auto_gptq compatibility with optimum
-try:
-    import auto_gptq
-    if not hasattr(auto_gptq, "QuantizeConfig") and hasattr(auto_gptq, "BaseQuantizeConfig"):
-        auto_gptq.QuantizeConfig = auto_gptq.BaseQuantizeConfig
-except ImportError:
-    pass
-
-from .core.configuration import AppConfig
-from .core.registry import ModelRegistry
-from .core.presets import register_presets
-from .core.builder import GeneratorPipelineBuilder
-from .core.router import run_app
-from .core.config_utils import instantiate_recipe
+if TYPE_CHECKING:
+    from .core.configuration import AppConfig
 
 
 BENCHMARK_COMMANDS = {"run-benchmark", "run-benchmark-acc", "run-benchmark-agent"}
+
+
+def _configure_allocator_env(default: str = "expandable_segments:True") -> None:
+    """Configure PyTorch allocator env vars.
+
+    Some PyTorch builds still apply CUDA allocator settings more reliably via
+    PYTORCH_CUDA_ALLOC_CONF, while newer versions encourage PYTORCH_ALLOC_CONF.
+    We support both by mirroring values and providing stable defaults.
+    """
+
+    if "PYTORCH_ALLOC_CONF" in os.environ and "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = os.environ["PYTORCH_ALLOC_CONF"]
+        return
+
+    if "PYTORCH_CUDA_ALLOC_CONF" in os.environ and "PYTORCH_ALLOC_CONF" not in os.environ:
+        os.environ["PYTORCH_ALLOC_CONF"] = os.environ["PYTORCH_CUDA_ALLOC_CONF"]
+        return
+
+    os.environ.setdefault("PYTORCH_ALLOC_CONF", default)
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", default)
+
+
+def _maybe_patch_auto_gptq() -> None:
+    """Monkey patch for auto_gptq compatibility with optimum (best-effort)."""
+
+    try:
+        import auto_gptq  # type: ignore[import-not-found]
+
+        if not hasattr(auto_gptq, "QuantizeConfig") and hasattr(auto_gptq, "BaseQuantizeConfig"):
+            auto_gptq.QuantizeConfig = auto_gptq.BaseQuantizeConfig
+    except ImportError:
+        pass
+
+
+def _configure_runtime_environment() -> None:
+    # Reduce run-to-run drift from cuBLAS matmul reductions.
+    # Important: set before the first CUDA context initialization.
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":16:8")
+
+    # Keep allocator behavior stable by default (can be overridden via env).
+    _configure_allocator_env(default="expandable_segments:True")
 
 
 def _deep_merge_dict(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -93,7 +124,7 @@ def _apply_yaml_overrides(default_config: Dict[str, Any], yaml_config: Dict[str,
         from specdecodes.models.utils.utils import DraftParams
 
         base_dp = _draft_params_to_dict(default_config.get("draft_params"))
-        merged_dp = _deep_merge_dict(base_dp, cfg["draft_params"])
+        merged_dp = _deep_merge_dict(base_dp, dict(cfg["draft_params"]))
         cfg["draft_params"] = DraftParams(**merged_dp)
 
     # generator_kwargs deep-merge.
@@ -199,7 +230,6 @@ def _build_full_parser(base_parser: argparse.ArgumentParser, default_config: Dic
     full_parser.add_argument("--draft-model-path", type=str, default=default_config.get("draft_model_path", None))
     full_parser.add_argument("--max-length", type=int, default=default_config.get("max_length", 2048))
     full_parser.add_argument("--seed", type=int, default=default_config.get("seed", 0))
-    # NOTE: keep the historical default here; method/yaml overrides can still provide device via other means.
     full_parser.add_argument("--device", type=str, default="cuda:0")
     full_parser.add_argument("--compile-mode", type=str, default=default_config.get("compile_mode", None))
     full_parser.add_argument("--temperature", type=float, default=default_config.get("temperature", 0.0))
@@ -230,26 +260,28 @@ def _build_full_parser(base_parser: argparse.ArgumentParser, default_config: Dic
         help="Enable/disable generator profiling",
     )
 
-    default_lossy_verify = bool((default_config.get("generator_kwargs") or {}).get("lossy_verify", False))
+    default_verify_method = str((default_config.get("generator_kwargs") or {}).get("verify_method", "exact") or "exact").strip().lower()
     full_parser.add_argument(
-        "--lossy-verify",
-        action="store_true",
-        default=default_lossy_verify,
-        help="Use lossy verification (threshold + window) instead of exact verification for tree-based SD methods",
+        "--verify-method",
+        type=str,
+        choices=["exact", "lossy"],
+        default=default_verify_method,
+        help="Verification method for tree-based SD: exact or lossy",
     )
 
-    # DraftParams overrides (only applied when explicitly provided)
     full_parser.add_argument(
-        "--lossy-threshold",
+        "--threshold",
+        "-e",
         type=float,
         default=None,
-        help="Lossy SD: accept non-matching draft token if target prob >= this threshold",
+        help="Lossy verify: accept non-matching draft token only if target prob >= this threshold",
     )
     full_parser.add_argument(
-        "--lossy-window-size",
+        "--window-size",
+        "-w",
         type=int,
         default=None,
-        help="Lossy SD: require this many future locally-correct draft nodes (lookahead)",
+        help="Lossy verify: require this many future locally-correct nodes (lookahead)",
     )
 
     return full_parser
@@ -301,89 +333,52 @@ def _apply_generator_kwargs_overrides(config: AppConfig, config_args: argparse.N
     if config_args.prefill_chunk_size is not None:
         config.generator_kwargs["prefill_chunk_size"] = int(config_args.prefill_chunk_size)
 
-    # Verifier mode switch (applies to tree-based SD generators that route through verify_tree).
-    config.generator_kwargs["lossy_verify"] = bool(config_args.lossy_verify)
+    # Verifier selection + method kwargs.
+    config.generator_kwargs["verify_method"] = str(getattr(config_args, "verify_method", "exact") or "exact").strip().lower()
+    config.generator_kwargs.setdefault("verify_kwargs", {})
+    if getattr(config_args, "threshold", None) is not None:
+        config.generator_kwargs["verify_kwargs"]["threshold"] = float(config_args.threshold)
+    if getattr(config_args, "window_size", None) is not None:
+        config.generator_kwargs["verify_kwargs"]["window_size"] = int(config_args.window_size)
 
 
 def _apply_draft_params_overrides(config: AppConfig, config_args: argparse.Namespace) -> None:
-    if config_args.lossy_threshold is None and config_args.lossy_window_size is None:
-        return
+    return
 
-    from specdecodes.models.utils.utils import DraftParams
 
-    if config.draft_params is None:
-        config.draft_params = DraftParams()
-
-    if config_args.lossy_threshold is not None:
-        config.draft_params.lossy_threshold = float(config_args.lossy_threshold)
-    if config_args.lossy_window_size is not None:
-        config.draft_params.lossy_window_size = int(config_args.lossy_window_size)
-
-def main():
-    # Reduce run-to-run drift from cuBLAS matmul reductions.
-    # Important: set before the first CUDA context initialization.
-    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":16:8")
-
-    # 1. Parse method + YAML config path first to load defaults
-    base_parser = _build_base_parser()
-    args, _ = base_parser.parse_known_args()
-
-    # YAML config is required for all runs.
+def _load_yaml_and_method(args: argparse.Namespace) -> tuple[str, Dict[str, Any], str]:
     try:
         config_path = _resolve_existing_path(args.config)
     except FileNotFoundError:
         print(f"Config file not found: {os.path.abspath(os.path.expanduser(args.config))}")
         sys.exit(1)
+
     yaml_config = _load_yaml_config(config_path)
 
     try:
-        args.method = _resolve_method(args.method, yaml_config)
+        method = _resolve_method(args.method, yaml_config)
     except ValueError as e:
         print(f"Error: {e}")
         sys.exit(2)
 
-    # If enabled via YAML/CLI, re-exec under Nsight Systems *before* importing heavy GPU code.
-    effective_nvtx = bool(args.nvtx_profiling) if args.nvtx_profiling is not None else bool(yaml_config.get("nvtx_profiling", False))
-    effective_nsys_output = str(args.nsys_output) if args.nsys_output is not None else str(yaml_config.get("nsys_output", "nsight_report"))
-    _maybe_reexec_with_nsys(effective_nvtx, effective_nsys_output)
+    return config_path, yaml_config, method
 
-    # 2. Register presets (after optional nsys re-exec)
-    register_presets()
-    
-    # 3. Get default config for the method
-    method_entry = ModelRegistry.get(args.method)
-    if method_entry is None:
-        print(f"Unknown method: {args.method}. Available methods: {ModelRegistry.list_methods()}")
-        sys.exit(1)
-        
-    default_config = method_entry.default_config.copy()
 
-    # Merge YAML into default_config (defaults <- yaml).
-    default_config = _apply_yaml_overrides(default_config, yaml_config)
-    
-    # 4. Create full parser for AppConfig
-    # We populate arguments based on AppConfig fields, but respecting the method's defaults
-    full_parser = _build_full_parser(base_parser, default_config)
-    
-    # Parse again with known args to override defaults
-    # We still use parse_known_args because run_app (Typer) needs the rest
-    config_args, typer_argv = full_parser.parse_known_args()
+def _effective_nsys_settings(args: argparse.Namespace, yaml_config: Dict[str, Any]) -> tuple[bool, str]:
+    enabled = (
+        bool(args.nvtx_profiling)
+        if args.nvtx_profiling is not None
+        else bool(yaml_config.get("nvtx_profiling", False))
+    )
+    output = (
+        str(args.nsys_output)
+        if args.nsys_output is not None
+        else str(yaml_config.get("nsys_output", "nsight_report"))
+    )
+    return enabled, output
 
-    # (Kept for backward compatibility + explicit error messaging if this file is reused elsewhere.)
-    _enforce_benchmark_requires_config(typer_argv, args.config)
-    
-    # 5. Build AppConfig
-    config = AppConfig()
-    config.method = args.method
-    
-    # Update config from defaults
-    config.update(default_config)
-    
-    # Update config from CLI args
-    _apply_cli_overrides(config, config_args)
-    _apply_generator_kwargs_overrides(config, config_args)
-    _apply_draft_params_overrides(config, config_args)
 
+def _configure_wandb_flags(config: "AppConfig") -> None:
     # Propagate global research flags via wandb_logger (avoids env var plumbing).
     try:
         from specdecodes.models.utils.wandb_logger import wandb_logger
@@ -395,6 +390,78 @@ def main():
     except Exception:
         # Keep main robust even if wandb_logger isn't importable in some minimal setups.
         pass
+
+
+def _build_app_config(
+    *,
+    AppConfig: type["AppConfig"],
+    method: str,
+    default_config: Dict[str, Any],
+    config_args: argparse.Namespace,
+) -> "AppConfig":
+    config = AppConfig()
+    config.method = method
+    config.update(default_config)
+
+    _apply_cli_overrides(config, config_args)
+    _apply_generator_kwargs_overrides(config, config_args)
+    return config
+
+
+def main():
+    # Configure env + compatibility patches before importing heavy GPU code.
+    _configure_runtime_environment()
+    _maybe_patch_auto_gptq()
+
+    # 1) Parse method + YAML config path first to load defaults
+    base_parser = _build_base_parser()
+    args, _ = base_parser.parse_known_args()
+    _, yaml_config, method = _load_yaml_and_method(args)
+
+    # If enabled via YAML/CLI, re-exec under Nsight Systems *before* importing heavy GPU code.
+    nsys_enabled, nsys_output = _effective_nsys_settings(args, yaml_config)
+    _maybe_reexec_with_nsys(nsys_enabled, nsys_output)
+
+    # Import project modules lazily so env defaults above apply before any torch/CUDA init.
+    from .core.configuration import AppConfig
+    from .core.registry import ModelRegistry
+    from .core.presets import register_presets
+    from .core.builder import GeneratorPipelineBuilder
+    from .core.router import run_app
+    from .core.config_utils import instantiate_recipe
+
+    # 2) Register presets (after optional nsys re-exec)
+    register_presets()
+    
+    # 3) Get default config for the method
+    method_entry = ModelRegistry.get(method)
+    if method_entry is None:
+        print(f"Unknown method: {method}. Available methods: {ModelRegistry.list_methods()}")
+        sys.exit(1)
+        
+    default_config = method_entry.default_config.copy()
+
+    # Merge YAML into default_config (defaults <- yaml).
+    default_config = _apply_yaml_overrides(default_config, yaml_config)
+    
+    # 4) Build full parser for AppConfig (method defaults <- YAML; CLI overrides both)
+    full_parser = _build_full_parser(base_parser, default_config)
+    
+    # Parse again with known args to override defaults
+    # We still use parse_known_args because run_app (Typer) needs the rest
+    config_args, typer_argv = full_parser.parse_known_args()
+
+    # (Kept for backward compatibility + explicit error messaging if this file is reused elsewhere.)
+    _enforce_benchmark_requires_config(typer_argv, args.config)
+    
+    # 5) Build AppConfig
+    config = _build_app_config(
+        AppConfig=AppConfig,
+        method=method,
+        default_config=default_config,
+        config_args=config_args,
+    )
+    _configure_wandb_flags(config)
 
     # Allow YAML to specify recipes via import path + kwargs.
     config.recipe = instantiate_recipe(getattr(config, "recipe", None))

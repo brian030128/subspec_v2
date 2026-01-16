@@ -17,7 +17,13 @@ def run_common_eval(generator, tokenizer, past_key_values, draft_past_key_values
         input_message = "Write an essay about large language models."
         messages = [{"role": "user", "content": input_message}]
         tokenizer.use_default_system_prompt = True
-        input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda(device=args.device)
+        input_ids = tokenizer.apply_chat_template(
+            messages, 
+            tokenize=True, 
+            add_generation_prompt=True, 
+            return_tensors="pt",
+            enable_thinking=True # for Qwen 3 models
+        ).cuda(device=args.device)
         torch.cuda.empty_cache()
         with sdpa_kernel(backends=[SDPBackend.MATH]):
             gc.collect()
@@ -182,7 +188,7 @@ def run_mtbench_eval(generator, tokenizer, past_key_values, draft_past_key_value
                     tmp_exp_log['speculate_count'] = 0
                 tmp_exp_log['post_verify_count'] += wandb_logger.log_data.get('post_verify_count', 0)
                 tmp_exp_log['speculate_count'] += wandb_logger.log_data.get('speculate_count', 0)
-            
+
             exp_log = {**exp_log, tid: {**wandb_logger.log_data, "query": query, "response": output_message, "peak_memory": torch.cuda.max_memory_reserved(args.device)/(1024**3)}}
             messages.append({"role": "system", "content": output_message})
             
