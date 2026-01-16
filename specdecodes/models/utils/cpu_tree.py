@@ -8,6 +8,7 @@ class TreeNode:
         'depth',
         'token_id',
         'cumulative_probability',
+        'has_been_sampled'
     )
 
     def __init__(
@@ -22,6 +23,7 @@ class TreeNode:
         self.depth = depth
         self.token_id = token_id
         self.cumulative_probability = cumulative_probability
+        self.has_been_sampled = False
         
     def __repr__(self):
         return f"TreeNode(token_id={self.token_id}, cumulative_probability={self.cumulative_probability:.4f}, depth={self.depth}, parent={self.parent})"
