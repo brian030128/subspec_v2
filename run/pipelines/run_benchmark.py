@@ -150,7 +150,9 @@ def main(builder, benchmarks=None, max_samples=None):
         torch.cuda.reset_peak_memory_stats()
 
         # Evaluate
+        eval_start = time.perf_counter()
         metrics_json = BENCHMARK_EVALUATORS[bench_name](generator, tokenizer, past_kv, draft_past_kv, args, dataset, log_dir)
+        eval_time_s = time.perf_counter() - eval_start
         
         torch.cuda.empty_cache()
         gc.collect()
@@ -172,6 +174,7 @@ def main(builder, benchmarks=None, max_samples=None):
         #     f.write("\n")
         
         # reduce float values to 3 decimal places
+        metrics_json["total_eval_time_s"] = float(eval_time_s)
         for key in metrics_json:
             if isinstance(metrics_json[key], float):
                 metrics_json[key] = f"{metrics_json[key]:.3f}"

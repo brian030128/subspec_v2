@@ -223,6 +223,7 @@ def main(
 
         # Evaluate
         try:
+            eval_start = time.perf_counter()
             results = evaluate_single_param(
                 model,
                 draft_model,
@@ -237,6 +238,7 @@ def main(
                 threshold,
                 window_size,
             )
+            eval_time_s = time.perf_counter() - eval_start
 
             tput_mean = float(results.get("tput_mean", 0.0))
             tput_std = float(results.get("tput_std", 0.0))
@@ -267,6 +269,7 @@ def main(
                     "avg_draft_time": f"{avg_draft_time:.3f}",
                     "avg_target_time": f"{avg_target_time:.3f}",
                     "peak_memory": f"{peak_mem:.3f} GiB",
+                    "total_eval_time_s": f"{eval_time_s:.3f}",
                     "threshold": f"{float(threshold):.6g}",
                     "window_size": int(window_size),
                 }
