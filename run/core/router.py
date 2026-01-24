@@ -81,6 +81,27 @@ def run_app(builder):
         main_run_benchmark_agent(builder, benchmarks=benchmarks, max_samples=max_samples)
 
     @app.command()
+    def run_depth_analysis(
+        benchmarks: str = None,
+        max_samples: int = None,
+    ):
+        """Run depth analysis to collect acceptance length statistics.
+        
+        Collects acceptance length data from speculative decoding verification rounds
+        for calibrating latency models and analyzing optimal draft tree depth.
+        
+        Output per benchmark:
+            - acc_arr.npy: Acceptance lengths array
+            - prompt_sample_counts.npy: Samples per prompt (for boundary reconstruction)
+            - results.json: Summary statistics (mean_acc, tau_D, beta_D, etc.)
+        
+        Usage:
+            python -m run.main --config configs/... run-depth-analysis --benchmarks mt-bench,gsm8k --max-samples 100
+        """
+        from run.pipelines.run_depth_analysis import main as main_run_depth_analysis
+        main_run_depth_analysis(builder, benchmarks=benchmarks, max_samples=max_samples)
+
+    @app.command()
     def run_gradio(
         host: str = typer.Option("127.0.0.1", help="Host/interface to bind the Gradio server"),
         port: int = typer.Option(7860, help="Port to bind the Gradio server"),

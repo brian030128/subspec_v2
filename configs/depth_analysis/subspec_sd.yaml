@@ -1,0 +1,28 @@
+# SubSpec SD (v1) example
+method: subspec_sd
+
+llm_path: meta-llama/Llama-3.1-8B-Instruct
+
+recipe:
+  class_path: specdecodes.helpers.recipes.subspec.hqq_4bit_no_offload:Recipe # No offload for faster depth analysis
+
+max_length: 4096
+cache_implementation: static
+warmup_iter: 1
+compile_mode: max-autotune
+
+# Target sampling settings (defaults)
+do_sample: false
+temperature: 0
+
+generator_profiling: true
+
+generator_kwargs:
+  prefill_chunk_size: 1024
+  verify_method: exact
+  verify_kwargs: {}
+
+draft_params:
+  temperature: 0.2
+  max_depth: 128 # Increased depth for analysis
+  topk_len: 6
