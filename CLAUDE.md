@@ -21,6 +21,7 @@ specdecodes/
       flashinfer/
         cache_manager.py         # KvCachePool, RequestKvCache, KvCacheBatchPosition
         attention_wrapper.py     # FlashinferAttentionWrapper
+        be_attention_wrapper.py  # BeFlashinferWrapper (new .plan()/.run() API + CUDA graph decode)
 configs/
   methods/                       # Per-method YAML templates
   exp_offloading/                # Full experiment configs (offloading variants)
@@ -82,6 +83,7 @@ This is the active development area. The file lives at `specdecodes/models/draft
 | Forward per step | 1 call, batch=[1, K] tokens with tree attention mask | 1 call, batch=[K, 1] tokens, no mask needed |
 | KV writes | All in `request_kv_cache`; rolled back via `decrement()` | Separate page allocations; prompt pages shared read-only |
 | postspec | Enabled (extends tree depth) | Disabled (`postspec_count = max_depth`) |
+| CUDA graph | Tree-mode prefill wrapper (`init_cuda_graph_runner` / `tree_step`) | Decode wrapper for K beams (`init_cuda_graph_runner` / `beam_decode_step`) |
 
 ### Key data structures
 
@@ -118,6 +120,26 @@ This is the active development area. The file lives at `specdecodes/models/draft
 - On new node creation: `node_pages[new] = list(node_pages[parent])` + increment all refs.
 - On old-node release: decrement all refs; deallocate pages that hit 0.
 - Final cleanup: collect unique non-prompt pages across all remaining `node_pages` entries (use a `set()` to avoid double-free) and deallocate.
+
+### CUDA Graph support (`be_classic_sd_fi.py`)
+
+The beam decode loop (K beams x 1 token each) supports CUDA graph capture/replay to eliminate per-step kernel launch overhead.
+
+**How it works:**
+- `init_cuda_graph_runner(device)` — called during warmup. Allocates fixed staging buffers for model inputs and `KvCacheBatchPosition`, reinitializes the decode wrapper with `use_cuda_graph=True` via `BeFlashinferWrapper.init_cuda_graph_decode()`, runs 2 warmups, then captures the forward pass into `self.beam_graph`.
+- `beam_decode_step(beam_input_ids, beam_position_ids, batch_position)` — copies live data into staging buffers, calls `prepareAttention` (plan) outside the graph, then replays `self.beam_graph`. Returns `self.beam_output_buffer`.
+- The decode loop in `speculate()` branches on `hasattr(self, 'beam_graph')`: graph path when captured, direct forward otherwise.
+
+**Key constraint:** FlashInfer's `plan()` must be called **outside** the CUDA graph; only `run()` is captured inside.
+
+**Staging buffers** (all sized for K beams):
+- `beam_input_ids_buf` [K, 1], `beam_position_ids_buf` [K, 1]
+- `beam_kv_page_indptr_buf` [K+1], `beam_kv_page_indices_buf` [max_pages], `beam_kv_last_page_len_buf` [K], `beam_positions_buf` [K]
+- `beam_batch_position` — persistent `KvCacheBatchPosition` wrapping the staging buffers
+
+**Testing:**
+- Without graph: `--warmup-iter 0` (skips `init_cuda_graph_runner`)
+- With graph: default warmup enables graph capture/replay
 
 ### Module-level helpers
 
