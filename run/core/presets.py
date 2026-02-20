@@ -43,6 +43,63 @@ def flashinfer_load_kv_cache(builder, target_model, draft_model):
 
     return past_key_values, draft_past_key_values
 
+def be_classic_sd_fi_load_kv_cache(builder, target_model, draft_model):
+    """
+    Custom KV cache loader for be_classic_sd_fi beam search.
+
+    The draft pool needs K+max_depth pages instead of 1:
+      - 1 page holds the prompt (PAGE_LEN = max_cache_len covers full sequence)
+      - K pages for per-beam COW copies during decode
+      - max_depth buffer for allocations at page boundaries
+    """
+    try:
+        from specdecodes.models.utils.flashinfer.cache_manager import FlashInferCache, KvCachePool
+    except ModuleNotFoundError as e:
+        raise ImportError(
+            f"Method '{builder.config.method}' requires the optional dependency 'flashinfer'.\n"
+            "Hint: install it (and its deps), e.g. `pip install flashinfer-python`, then retry."
+        ) from e
+
+    if builder.max_length is None:
+        raise ValueError("max_length should be set for FlashInfer cache.")
+
+    # Calculate max_cache_len (same as flashinfer_load_kv_cache)
+    max_verify_tokens = 0
+    if builder.draft_params:
+        if hasattr(builder.draft_params, "max_verify_tokens"):
+            max_verify_tokens = builder.draft_params.max_verify_tokens
+        elif hasattr(builder.draft_params, "max_sample_tokens"):
+            max_verify_tokens = builder.draft_params.max_sample_tokens
+        elif hasattr(builder.draft_params, "num_nodes"):
+            max_verify_tokens = builder.draft_params.num_nodes + 1
+
+    max_cache_len = builder.max_length + max_verify_tokens
+
+    # Target model: same as classic_sd_fi (1 giant page)
+    past_key_values = FlashInferCache(
+        target_model.config, max_tokens=max_cache_len, PAGE_LEN=max_cache_len
+    ).kvCachePool
+
+    # Draft model: K+max_depth pages for beam search COW
+    K = builder.draft_params.topk_len if builder.draft_params else 6
+    max_depth = builder.draft_params.max_depth if builder.draft_params else 8
+
+    currentDevice = torch.device(f'cuda:{torch.cuda.current_device()}')
+    config = draft_model.config
+    head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+
+    draft_past_key_values = KvCachePool(
+        max_pages=K + max_depth,  # 6 + 8 = 14 pages for typical config
+        num_layers=config.num_hidden_layers,
+        num_heads=config.num_key_value_heads,
+        head_dim=head_dim,
+        page_len=max_cache_len,
+        dtype=torch.float16,
+        device=currentDevice,
+    )
+
+    return past_key_values, draft_past_key_values
+
 def flashinfer_load_draft_model(builder, target_model, tokenizer, draft_model_path):
     try:
         from specdecodes.models.utils.flashinfer.monkey_patch import apply_flashinfer_kernel_to_llama
@@ -229,7 +286,7 @@ def register_presets():
             "recipe": None,
         },
         load_draft_model_fn=flashinfer_load_draft_model,
-        load_kv_cache_fn=flashinfer_load_kv_cache,
+        load_kv_cache_fn=be_classic_sd_fi_load_kv_cache,
     )
 
     # SubSpec SD FlashInfer (lazy import)
