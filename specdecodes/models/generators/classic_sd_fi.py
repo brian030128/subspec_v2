@@ -14,6 +14,22 @@ from ..utils.flashinfer.be_attention_wrapper import BeFlashinferWrapper
 from ..utils.flashinfer.prefill import flashinfer_chunked_prefill
 
 class ClassicSDGeneratorBase(ClassicSDBase):
+    def _debug_print_tree(self, tree):
+        """Print all root-to-leaf sequences in the draft tree."""
+        leaves = [i for i in range(tree.current_size) if not tree.nodes[i].children]
+        print(f"--- Draft tree: {tree.current_size} nodes, {len(leaves)} leaves ---")
+        for leaf_idx in leaves:
+            path = []
+            cur = leaf_idx
+            while cur is not None:
+                path.append(tree.nodes[cur].token_id)
+                cur = tree.nodes[cur].parent
+            path.reverse()
+            tokens = path[1:]  # skip root (last context token)
+            prob = tree.nodes[leaf_idx].cumulative_probability
+            text = self.tokenizer.decode(tokens)
+            print(f"  depth={tree.nodes[leaf_idx].depth} prob={prob:.4f}: {text!r}")
+
     def _make_flashinfer_wrapper(self, num_attention_heads, num_kv_heads, hidden_size, page_len):
         return FlashinferAttentionWrapper(num_attention_heads, num_kv_heads, hidden_size, page_len)
 
@@ -182,6 +198,7 @@ class ClassicSDGeneratorBase(ClassicSDBase):
                 with nvtx.annotate("speculate", color="cyan"):
                     last_token_ids = input_ids[:, draft_request_kv_cache.get_seq_length():].clone(memory_format=torch.contiguous_format)
                     tree = self._speculate(last_token_ids, draft_request_kv_cache)
+                    self._debug_print_tree(tree)
 
                 with nvtx.annotate("target_decode", color="orange"):
                     prev_kv_len = request_kv_cache.get_seq_length() + 1
@@ -199,6 +216,7 @@ class ClassicSDGeneratorBase(ClassicSDBase):
                         do_sample,
                     )
                     sampled_tokens = sampled_tokens.to(input_ids.device)
+                    print(f"  [accepted {sampled_tokens.shape[1]} tokens]: {self.tokenizer.decode(sampled_tokens[0].tolist())!r}")
                     del next_token_logits
                     
                 with nvtx.annotate("kv_reorder"):
