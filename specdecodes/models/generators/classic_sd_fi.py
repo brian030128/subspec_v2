@@ -10,9 +10,13 @@ from ..utils.flashinfer.cache_manager import (
     getKvCacheBatchPosition,
 )
 from ..utils.flashinfer.attention_wrapper import FlashinferAttentionWrapper
+from ..utils.flashinfer.be_attention_wrapper import BeFlashinferWrapper
 from ..utils.flashinfer.prefill import flashinfer_chunked_prefill
 
 class ClassicSDGeneratorBase(ClassicSDBase):
+    def _make_flashinfer_wrapper(self, num_attention_heads, num_kv_heads, hidden_size, page_len):
+        return FlashinferAttentionWrapper(num_attention_heads, num_kv_heads, hidden_size, page_len)
+
     def init_cuda_graph_runner(self,device,kvCachePool=None):
         """
         Initialize the draft model CUDA-graph runner (FlashInfer path only).
@@ -138,8 +142,8 @@ class ClassicSDGeneratorBase(ClassicSDBase):
                 self.draft_params.max_verify_tokens, max_cache_len, device=input_ids.device
             )
             if not hasattr(self, 'flashinferWrapper'):
-                self.flashinferWrapper = FlashinferAttentionWrapper(
-                    self.target_model.config.num_attention_heads, self.target_model.config.num_key_value_heads, self.target_model.config.hidden_size,past_key_values.page_len
+                self.flashinferWrapper = self._make_flashinfer_wrapper(
+                    self.target_model.config.num_attention_heads, self.target_model.config.num_key_value_heads, self.target_model.config.hidden_size, past_key_values.page_len
                 )
 
             self.kvCachePool = past_key_values
@@ -214,4 +218,13 @@ class ClassicSDGeneratorBase(ClassicSDBase):
         return input_ids
     
 class ClassicSDGenerator(SDProfilingMixin, ClassicSDGeneratorBase):
+    pass
+
+
+class BeClassicSDGeneratorBase(ClassicSDGeneratorBase):
+    def _make_flashinfer_wrapper(self, num_attention_heads, num_kv_heads, hidden_size, page_len):
+        return BeFlashinferWrapper(num_attention_heads, num_kv_heads, hidden_size, page_len)
+
+
+class BeClassicSDGenerator(SDProfilingMixin, BeClassicSDGeneratorBase):
     pass

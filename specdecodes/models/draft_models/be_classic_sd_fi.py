@@ -13,7 +13,7 @@ from ..utils.flashinfer.cache_manager import (
     getKvCacheBatchPosition,
     FlashInferCache
 )
-from ..utils.flashinfer.attention_wrapper import FlashinferAttentionWrapper
+from ..utils.flashinfer.be_attention_wrapper import BeFlashinferWrapper
 import numpy as np
 import pathlib
 
@@ -201,7 +201,7 @@ class ClassicSDDraftModel(DraftModelBase):
         self.request_kv_cache = request_kv_cache
 
         if not hasattr(self, 'flashinferWrapper'):
-            self.flashinferWrapper = FlashinferAttentionWrapper(
+            self.flashinferWrapper = BeFlashinferWrapper(
                 self.model.config.num_attention_heads,
                 self.model.config.num_key_value_heads,
                 self.model.config.hidden_size,

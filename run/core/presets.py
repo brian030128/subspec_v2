@@ -278,7 +278,7 @@ def register_presets():
     # BE Classic SD FlashInfer (beam_engine beam search)
     ModelRegistry.register(
         name="be_classic_sd_fi",
-        generator_cls="specdecodes.models.generators.classic_sd_fi:ClassicSDGenerator",
+        generator_cls="specdecodes.models.generators.classic_sd_fi:BeClassicSDGenerator",
         draft_model_cls="specdecodes.models.draft_models.be_classic_sd_fi:ClassicSDDraftModel",
         default_config={
             "llm_path": "meta-llama/Llama-3.1-8B-Instruct",
