@@ -7,9 +7,6 @@ versions.  This module provides the same interface but calls .plan() / .run()
 internally so that be_classic_sd_fi works on machines with the newer library.
 """
 
-import math
-from typing import Optional
-
 import torch
 import flashinfer
 
@@ -53,56 +50,6 @@ class BeFlashinferWrapper:
             use_tensor_cores=_use_tensor_cores,
         )
 
-        self.tree_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-            float_workspace_buffer=_workspace_buffer, kv_layout="NHD"
-        )
-
-        # for cuda graph
-        batch_size = 1
-
-        self.qo_indptr_buf = torch.zeros(
-            (batch_size + 1,),
-            dtype=torch.int32,
-            device=torch.cuda.current_device()
-        )
-        self.paged_kv_indptr_buf = torch.zeros(
-            (batch_size + 1,),
-            dtype=torch.int32,
-            device=torch.cuda.current_device()
-        )
-        self.paged_kv_indices_buf = torch.zeros(
-            1024,
-            dtype=torch.int32,
-            device=torch.cuda.current_device()
-        )
-        self.paged_kv_last_page_len_buf = torch.zeros(
-            (batch_size,),
-            dtype=torch.int32,
-            device=torch.cuda.current_device()
-        )
-        self.custom_mask_buf = torch.zeros(
-            100000 * 1000,
-            dtype=torch.uint8,
-            device=torch.cuda.current_device()
-        )
-        self.mask_indptr_buf = torch.zeros(
-            (batch_size + 1,),
-            dtype=torch.int32,
-            device=torch.cuda.current_device()
-        )
-
-        self.tree_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-            float_workspace_buffer=_workspace_buffer,
-            kv_layout="NHD",
-            use_cuda_graph=True,
-            qo_indptr_buf=self.qo_indptr_buf,
-            paged_kv_indptr_buf=self.paged_kv_indptr_buf,
-            paged_kv_indices_buf=self.paged_kv_indices_buf,
-            paged_kv_last_page_len_buf=self.paged_kv_last_page_len_buf,
-            custom_mask_buf=self.custom_mask_buf,
-            mask_indptr_buf=self.mask_indptr_buf,
-        )
-
         # Pre-allocated output buffer for decode (avoids per-call allocation)
         self._decode_output_buf = None
 
@@ -116,34 +63,8 @@ class BeFlashinferWrapper:
         page_len: int,
         pos_encoding_mode: POS_ENCODING_MODE,
         dtype: torch.dtype,
-        attention_mask: Optional[torch.Tensor] = None,
     ):
-        if mode == "tree" and attention_mask is not None:
-            self.tree_wrapper.plan(
-                qo_indptr=batch_position.seq_indptr,
-                paged_kv_indptr=batch_position.kv_page_indptr,
-                paged_kv_indices=batch_position.kv_page_indices,
-                paged_kv_last_page_len=batch_position.kv_last_page_len,
-                num_qo_heads=self.num_attention_heads,
-                num_kv_heads=self.num_key_value_heads,
-                head_dim_qk=self._head_padded_dim,
-                page_size=page_len,
-                custom_mask=attention_mask,
-                causal=False,
-            )
-        elif mode == "tree" and attention_mask is None:
-            self.tree_wrapper.plan(
-                qo_indptr=batch_position.seq_indptr,
-                paged_kv_indptr=batch_position.kv_page_indptr,
-                paged_kv_indices=batch_position.kv_page_indices,
-                paged_kv_last_page_len=batch_position.kv_last_page_len,
-                num_qo_heads=self.num_attention_heads,
-                num_kv_heads=self.num_key_value_heads,
-                head_dim_qk=self._head_padded_dim,
-                page_size=page_len,
-                causal=True,
-            )
-        elif mode == "prefill":
+        if mode == "prefill":
             self.prefill_wrapper.plan(
                 qo_indptr=batch_position.seq_indptr,
                 paged_kv_indptr=batch_position.kv_page_indptr,
@@ -154,6 +75,7 @@ class BeFlashinferWrapper:
                 head_dim_qk=self._head_padded_dim,
                 page_size=page_len,
                 causal=True,
+                q_data_type=dtype,
             )
         elif mode == "decode":
             self.decode_wrapper.plan(
@@ -167,7 +89,7 @@ class BeFlashinferWrapper:
                 data_type=dtype,
             )
         else:
-            raise ValueError("the mode for attention must be prefill, decode or tree")
+            raise ValueError("the mode for attention must be prefill or decode")
 
     # ------------------------------------------------------------------
     # reshape / pad / unpad  — identical to FlashinferAttentionWrapper
@@ -234,8 +156,8 @@ class BeFlashinferWrapper:
             attn_output = self._batchPrefill(q, k, v, cacheData, batchPosition, rotaryParams)
         elif mode == 'decode':
             attn_output = self._batchDecode(q, k, v, cacheData, batchPosition, rotaryParams)
-        elif mode == 'tree':
-            attn_output = self._treeDecode(q, k, v, cacheData, batchPosition, rotaryParams)
+        else:
+            raise ValueError("the mode for attention must be prefill or decode")
 
         return self._unpad_attention(attn_output)
 
@@ -254,22 +176,6 @@ class BeFlashinferWrapper:
         self.append_kv_cache(q, k, v, prefillBatchPosition, cacheData, self.page_len)
         attn_output_prefill = self.prefill_wrapper.run(q, cacheData)
         return attn_output_prefill
-
-    # ------------------------------------------------------------------
-    # _treeDecode  — uses .run() instead of .forward()
-    # ------------------------------------------------------------------
-    def _treeDecode(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        cacheData: torch.Tensor,
-        treeBatchPosition: KvCacheBatchPosition,
-        rotaryParams: AttentionRotaryParams,
-    ):
-        self.append_kv_cache(q, k, v, treeBatchPosition, cacheData, self.page_len)
-        attn_output = self.tree_wrapper.run(q, cacheData)
-        return attn_output
 
     # ------------------------------------------------------------------
     # _batchDecode  — uses .run() with pre-allocated output buffer
