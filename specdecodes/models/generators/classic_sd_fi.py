@@ -33,6 +33,11 @@ class ClassicSDGeneratorBase(ClassicSDBase):
     def _make_flashinfer_wrapper(self, num_attention_heads, num_kv_heads, hidden_size, page_len):
         return FlashinferAttentionWrapper(num_attention_heads, num_kv_heads, hidden_size, page_len)
 
+    def _reorder_draft_cache(self, draft_request_kv_cache, hidden_indices, num_new_tokens):
+        draft_request_kv_cache.reorder_cache_with_offset(
+            hidden_indices, offset=draft_request_kv_cache.get_seq_length(), num_new_tokens=num_new_tokens
+        )
+
     def init_cuda_graph_runner(self,device,kvCachePool=None):
         """
         Initialize the draft model CUDA-graph runner (FlashInfer path only).
@@ -222,7 +227,7 @@ class ClassicSDGeneratorBase(ClassicSDBase):
                 with nvtx.annotate("kv_reorder"):
                     num_new_tokens = self.draft_params.max_verify_tokens
                     request_kv_cache.reorder_cache_with_offset(hidden_indices, offset=prev_kv_len, num_new_tokens=num_new_tokens)
-                    draft_request_kv_cache.reorder_cache_with_offset(hidden_indices, offset=draft_request_kv_cache.get_seq_length(), num_new_tokens=num_new_tokens)
+                    self._reorder_draft_cache(draft_request_kv_cache, hidden_indices, num_new_tokens)
 
                 with nvtx.annotate("state_update"):
                     input_ids = torch.cat([input_ids, sampled_tokens], dim=-1)
@@ -242,6 +247,9 @@ class ClassicSDGenerator(SDProfilingMixin, ClassicSDGeneratorBase):
 class BeClassicSDGeneratorBase(ClassicSDGeneratorBase):
     def _make_flashinfer_wrapper(self, num_attention_heads, num_kv_heads, hidden_size, page_len):
         return BeFlashinferWrapper(num_attention_heads, num_kv_heads, hidden_size, page_len)
+
+    def _reorder_draft_cache(self, draft_request_kv_cache, hidden_indices, num_new_tokens):
+        pass  # beam engine manages its own KV; skip reorder to avoid corruption
 
 
 class BeClassicSDGenerator(SDProfilingMixin, BeClassicSDGeneratorBase):
