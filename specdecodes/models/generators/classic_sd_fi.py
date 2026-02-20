@@ -203,7 +203,6 @@ class ClassicSDGeneratorBase(ClassicSDBase):
                 with nvtx.annotate("speculate", color="cyan"):
                     last_token_ids = input_ids[:, draft_request_kv_cache.get_seq_length():].clone(memory_format=torch.contiguous_format)
                     tree = self._speculate(last_token_ids, draft_request_kv_cache)
-                    self._debug_print_tree(tree)
 
                 with nvtx.annotate("target_decode", color="orange"):
                     prev_kv_len = request_kv_cache.get_seq_length() + 1
@@ -221,7 +220,6 @@ class ClassicSDGeneratorBase(ClassicSDBase):
                         do_sample,
                     )
                     sampled_tokens = sampled_tokens.to(input_ids.device)
-                    print(f"  [accepted {sampled_tokens.shape[1]} tokens]: {self.tokenizer.decode(sampled_tokens[0].tolist())!r}")
                     del next_token_logits
                     
                 with nvtx.annotate("kv_reorder"):
