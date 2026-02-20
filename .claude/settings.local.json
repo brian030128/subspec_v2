@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell -Command \"Get-Content ''C:\\\\Users\\\\brian\\\\.claude\\\\projects\\\\C--Users-brian-Desktop-programming-subspec-v2\\\\4fb43811-fb92-4194-9545-78c33aadc5eb.jsonl'' | ConvertFrom-Json -ErrorAction SilentlyContinue | Where-Object { $_message.content -like ''*beam search*'' -or $_message.content -like ''*EAGLE*'' } | Select-Object -First 10 | ConvertTo-Json -Depth 5\")",
+      "Bash(powershell:*)"
+    ]
+  }
+}

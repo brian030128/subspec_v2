@@ -218,6 +218,20 @@ def register_presets():
         load_kv_cache_fn=flashinfer_load_kv_cache,
     )
 
+    # BE Classic SD FlashInfer (beam_engine beam search)
+    ModelRegistry.register(
+        name="be_classic_sd_fi",
+        generator_cls="specdecodes.models.generators.classic_sd_fi:ClassicSDGenerator",
+        draft_model_cls="specdecodes.models.draft_models.be_classic_sd_fi:ClassicSDDraftModel",
+        default_config={
+            "llm_path": "meta-llama/Llama-3.1-8B-Instruct",
+            "draft_model_path": "meta-llama/Llama-3.2-1B-Instruct",
+            "recipe": None,
+        },
+        load_draft_model_fn=flashinfer_load_draft_model,
+        load_kv_cache_fn=flashinfer_load_kv_cache,
+    )
+
     # SubSpec SD FlashInfer (lazy import)
     try:
         from specdecodes.helpers.recipes.subspec.hqq_4bit_postspec import (
