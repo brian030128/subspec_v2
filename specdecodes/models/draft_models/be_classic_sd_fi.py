@@ -51,6 +51,93 @@ class ClassicSDDraftModel(DraftModelBase):
         self.had_first_speculate = False
         self.postspec_count = 0
 
+    def init_cuda_graph_runner(self, device: torch.device):
+        """Capture a CUDA graph for the beam decode forward (K beams, 1 token each)."""
+        print("be_classic_sd_fi: Initializing CUDA Graph runner for beam decode...")
+        if hasattr(self, "beam_graph"):
+            return
+
+        self.model.eval()
+        K = self.draft_params.topk_len
+        kvCachePool = self.kvCachePool
+        max_num_pages = kvCachePool.max_pages
+        PAGE_SIZE = kvCachePool.page_len
+        dtype = kvCachePool.cache_data[0].dtype
+
+        # ── Model input staging buffers ──
+        self.beam_input_ids_buf    = torch.zeros((K, 1), dtype=torch.long, device=device)
+        self.beam_position_ids_buf = torch.zeros((K, 1), dtype=torch.long, device=device)
+
+        # ── Batch position staging buffers ──
+        self.beam_kv_page_indptr_buf    = torch.zeros(K + 1, dtype=torch.int32, device=device)
+        self.beam_kv_page_indices_buf   = torch.zeros(max_num_pages, dtype=torch.int32, device=device)
+        self.beam_kv_last_page_len_buf  = torch.zeros(K, dtype=torch.int32, device=device)
+        self.beam_batch_indices_buf     = torch.arange(K, dtype=torch.int32, device=device)
+        self.beam_positions_buf         = torch.zeros(K, dtype=torch.int32, device=device)
+
+        # ── Persistent KvCacheBatchPosition wrapping staging buffers ──
+        self.beam_batch_position = KvCacheBatchPosition(
+            seq_indptr       = torch.arange(K + 1, dtype=torch.int32, device=device),
+            kv_page_indptr   = self.beam_kv_page_indptr_buf,
+            kv_page_indices  = self.beam_kv_page_indices_buf,
+            kv_last_page_len = self.beam_kv_last_page_len_buf,
+            batch_indices    = self.beam_batch_indices_buf,
+            positions        = self.beam_positions_buf,
+        )
+
+        # ── Reinit decode wrapper with CUDA graph support ──
+        self.flashinferWrapper.init_cuda_graph_decode(K, max_num_pages, device)
+
+        # ── Warmup + Capture ──
+        stream = torch.cuda.Stream(device=device)
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(2):
+                self.flashinferWrapper.prepareAttention(
+                    'decode', self.beam_batch_position, PAGE_SIZE, "NONE", dtype)
+                _ = self(
+                    self.beam_input_ids_buf, with_softmax=False,
+                    position_ids=self.beam_position_ids_buf,
+                    kvCachePool=kvCachePool, batch_position=self.beam_batch_position,
+                    mode='decode', flashinferWrapper=self.flashinferWrapper)
+
+            torch.cuda.current_stream().wait_stream(stream)
+            self.flashinferWrapper.prepareAttention(
+                'decode', self.beam_batch_position, PAGE_SIZE, "NONE", dtype)
+            cg = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(cg, stream=stream):
+                self.beam_output_buffer = self(
+                    self.beam_input_ids_buf, with_softmax=False,
+                    position_ids=self.beam_position_ids_buf,
+                    kvCachePool=kvCachePool, batch_position=self.beam_batch_position,
+                    mode='decode', flashinferWrapper=self.flashinferWrapper)
+
+        self.beam_graph = cg
+        print("be_classic_sd_fi: Finished capturing beam decode CUDA graph")
+
+    def beam_decode_step(self, beam_input_ids, beam_position_ids, batch_position):
+        """Copy data into staging buffers, re-plan, and replay the captured graph."""
+        # Copy model inputs
+        self.beam_input_ids_buf.copy_(beam_input_ids)
+        self.beam_position_ids_buf.copy_(beam_position_ids)
+
+        # Copy batch position
+        self.beam_kv_page_indptr_buf.copy_(batch_position.kv_page_indptr)
+        n_indices = batch_position.kv_page_indptr[-1].item()
+        self.beam_kv_page_indices_buf[:n_indices].copy_(batch_position.kv_page_indices[:n_indices])
+        self.beam_kv_last_page_len_buf.copy_(batch_position.kv_last_page_len)
+        self.beam_positions_buf.copy_(batch_position.positions)
+
+        # Re-plan (outside graph)
+        self.flashinferWrapper.prepareAttention(
+            'decode', self.beam_batch_position,
+            self.kvCachePool.page_len, "NONE",
+            self.kvCachePool.cache_data[0].dtype)
+
+        # Replay
+        self.beam_graph.replay()
+        return self.beam_output_buffer
+
     def forward(self, input_ids, with_softmax=False, *model_args, **kwargs):
         input_ids, kwargs = self._align_forward_inputs_to_model_device(input_ids, kwargs)
         logits = self.model(input_ids, *model_args, **kwargs).logits
@@ -195,22 +282,26 @@ class ClassicSDDraftModel(DraftModelBase):
                 dtype=torch.long, device=device,
             )
             beam_position_ids = torch.full((K, 1), current_pos, dtype=torch.long, device=device)
-            self.flashinferWrapper.prepareAttention(
-                'decode',
-                batch_position,
-                PAGE_SIZE,
-                "NONE",
-                kvCachePool.cache_data[0].dtype,
-            )
-            logits = self(
-                beam_input_ids,
-                with_softmax=False,
-                position_ids=beam_position_ids,
-                kvCachePool=kvCachePool,
-                batch_position=batch_position,
-                mode='decode',
-                flashinferWrapper=self.flashinferWrapper,
-            )  # [K, 1, vocab]
+
+            if hasattr(self, 'beam_graph'):
+                logits = self.beam_decode_step(beam_input_ids, beam_position_ids, batch_position)
+            else:
+                self.flashinferWrapper.prepareAttention(
+                    'decode',
+                    batch_position,
+                    PAGE_SIZE,
+                    "NONE",
+                    kvCachePool.cache_data[0].dtype,
+                )
+                logits = self(
+                    beam_input_ids,
+                    with_softmax=False,
+                    position_ids=beam_position_ids,
+                    kvCachePool=kvCachePool,
+                    batch_position=batch_position,
+                    mode='decode',
+                    flashinferWrapper=self.flashinferWrapper,
+                )  # [K, 1, vocab]
 
             # Score and select top-K next tokens across all beams
             probs = torch.softmax(logits[:, -1, :] / self.draft_params.temperature, dim=-1)  # [K, vocab]

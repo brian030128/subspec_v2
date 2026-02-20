@@ -55,6 +55,21 @@ class BeFlashinferWrapper:
         # Pre-allocated output buffer for decode (avoids per-call allocation)
         self._decode_output_buf = None
 
+    def init_cuda_graph_decode(self, K, max_num_pages, device):
+        """Reinitialize decode_wrapper with use_cuda_graph=True and pre-allocated buffers."""
+        _workspace_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.int8, device=device)
+        _use_tensor_cores = self.group_size in [7, 16]
+
+        self.decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
+            float_workspace_buffer=_workspace_buffer,
+            kv_layout="NHD",
+            use_tensor_cores=_use_tensor_cores,
+            use_cuda_graph=True,
+            paged_kv_indptr_buffer=torch.zeros(K + 1, dtype=torch.int32, device=device),
+            paged_kv_indices_buffer=torch.zeros(max_num_pages, dtype=torch.int32, device=device),
+            paged_kv_last_page_len_buffer=torch.zeros(K, dtype=torch.int32, device=device),
+        )
+
     # ------------------------------------------------------------------
     # prepareAttention  — uses .plan() instead of .begin_forward()
     # ------------------------------------------------------------------
