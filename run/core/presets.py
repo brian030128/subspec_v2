@@ -83,17 +83,22 @@ def be_classic_sd_fi_load_kv_cache(builder, target_model, draft_model):
     # Draft model: K+max_depth pages for beam search COW
     K = builder.draft_params.topk_len if builder.draft_params else 6
     max_depth = builder.draft_params.max_depth if builder.draft_params else 8
+    page_len = getattr(builder.draft_params, 'page_len', 1) if builder.draft_params else 1
 
     currentDevice = torch.device(f'cuda:{torch.cuda.current_device()}')
     config = draft_model.config
     head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
 
+    import math
+    pages_for_seq = math.ceil(max_cache_len / page_len)
+    max_pages = (K + max_depth) * pages_for_seq
+
     draft_past_key_values = KvCachePool(
-        max_pages=K + max_depth,  # 6 + 8 = 14 pages for typical config
+        max_pages=max_pages,
         num_layers=config.num_hidden_layers,
         num_heads=config.num_key_value_heads,
         head_dim=head_dim,
-        page_len=max_cache_len,
+        page_len=page_len,
         dtype=torch.float16,
         device=currentDevice,
     )
