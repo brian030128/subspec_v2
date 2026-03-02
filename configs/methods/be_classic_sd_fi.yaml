@@ -28,3 +28,4 @@ draft_params:
   temperature: 1.0
   max_depth: 8
   topk_len: 6
+  page_len: 1
