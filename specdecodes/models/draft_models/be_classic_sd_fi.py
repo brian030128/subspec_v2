@@ -1,3 +1,6 @@
+from dataclasses import dataclass, field
+from typing import List
+
 import torch
 import nvtx
 
@@ -9,6 +12,15 @@ from ..utils.flashinfer.cache_manager import (
     getKvCacheBatchPosition,
 )
 from ..utils.flashinfer.be_attention_wrapper import BeFlashinferWrapper
+
+
+@dataclass
+class CascadeData:
+    """Holds the 4 per-level tensor lists for MultiLevelCascadeAttentionWrapper.plan()."""
+    qo_indptr_arr: List[torch.Tensor] = field(default_factory=list)
+    kv_page_indptr_arr: List[torch.Tensor] = field(default_factory=list)
+    kv_page_indices_arr: List[torch.Tensor] = field(default_factory=list)
+    kv_last_page_len_arr: List[torch.Tensor] = field(default_factory=list)
 
 
 def _copy_block(kvCachePool, src_page, off):
@@ -42,6 +54,47 @@ def _build_beam_batch_position(beam_pages_list, current_pos, page_size, device):
         kv_last_page_len=torch.tensor([kv_last_page_len_val] * K, dtype=torch.int32, device=device),
         batch_indices=torch.arange(K, dtype=torch.int32, device=device),
         positions=torch.tensor([current_pos] * K, dtype=torch.int32, device=device),
+    )
+
+
+def _build_cascade_data(beam_pages_list, num_shared_pages, current_pos, page_size, device):
+    """
+    Build CascadeData for 2-level cascade attention.
+
+    Level 0 (shared): the first num_shared_pages pages (fully filled prompt pages),
+                       common to all K beams — computed once.
+    Level 1 (unique):  per-beam pages from index num_shared_pages onward
+                       (COW'd last prompt page + fresh decode pages).
+    """
+    K = len(beam_pages_list)
+    i32 = torch.int32
+
+    # --- Level 0: shared pages (single KV sequence seen by all K queries) ---
+    shared_pages = beam_pages_list[0][:num_shared_pages]
+    l0_qo_indptr = torch.tensor([0, K], dtype=i32, device=device)
+    l0_kv_page_indptr = torch.tensor([0, num_shared_pages], dtype=i32, device=device)
+    l0_kv_page_indices = torch.tensor(shared_pages, dtype=i32, device=device)
+    l0_kv_last_page_len = torch.tensor([page_size], dtype=i32, device=device)
+
+    # --- Level 1: per-beam unique pages ---
+    l1_kv_page_indices = []
+    l1_kv_page_indptr = [0]
+    for pages in beam_pages_list:
+        unique_pages = pages[num_shared_pages:]
+        l1_kv_page_indices.extend(unique_pages)
+        l1_kv_page_indptr.append(len(l1_kv_page_indices))
+
+    kv_last_page_len_val = current_pos % page_size + 1
+    l1_qo_indptr = torch.arange(K + 1, dtype=i32, device=device)
+    l1_kv_page_indptr_t = torch.tensor(l1_kv_page_indptr, dtype=i32, device=device)
+    l1_kv_page_indices_t = torch.tensor(l1_kv_page_indices, dtype=i32, device=device)
+    l1_kv_last_page_len = torch.tensor([kv_last_page_len_val] * K, dtype=i32, device=device)
+
+    return CascadeData(
+        qo_indptr_arr=[l0_qo_indptr, l1_qo_indptr],
+        kv_page_indptr_arr=[l0_kv_page_indptr, l1_kv_page_indptr_t],
+        kv_page_indices_arr=[l0_kv_page_indices, l1_kv_page_indices_t],
+        kv_last_page_len_arr=[l0_kv_last_page_len, l1_kv_last_page_len],
     )
 
 
@@ -171,6 +224,7 @@ class ClassicSDDraftModel(DraftModelBase):
                 self.model.config.hidden_size,
                 request_kv_cache.kvCachePool.page_len,
             )
+            self.flashinferWrapper.init_cascade_decode(2)
         self.kvCachePool = request_kv_cache.kvCachePool
 
         K = self.draft_params.topk_len
@@ -211,6 +265,7 @@ class ClassicSDDraftModel(DraftModelBase):
         )
         kv_len += input_len
         org_kv_len = kv_len
+        num_shared_pages = org_kv_len // PAGE_SIZE  # fully-filled prompt pages for cascade level 0
 
         # --- Init tree (root = last input token, same as original) ---
         tree = Tree(input_ids[0, -1], dtype)
@@ -285,7 +340,29 @@ class ClassicSDDraftModel(DraftModelBase):
 
             if hasattr(self, 'beam_graph'):
                 logits = self.beam_decode_step(beam_input_ids, beam_position_ids, batch_position)
+            elif num_shared_pages > 0:
+                # Cascade path: split shared prompt pages (level 0) from unique pages (level 1)
+                cascade_data = _build_cascade_data(
+                    beam_pages_list, num_shared_pages, current_pos, PAGE_SIZE, device)
+                self.flashinferWrapper.prepareCascadeAttention(
+                    cascade_data.qo_indptr_arr,
+                    cascade_data.kv_page_indptr_arr,
+                    cascade_data.kv_page_indices_arr,
+                    cascade_data.kv_last_page_len_arr,
+                    PAGE_SIZE,
+                    kvCachePool.cache_data[0].dtype,
+                )
+                logits = self(
+                    beam_input_ids,
+                    with_softmax=False,
+                    position_ids=beam_position_ids,
+                    kvCachePool=kvCachePool,
+                    batch_position=batch_position,
+                    mode='cascade_decode',
+                    flashinferWrapper=self.flashinferWrapper,
+                )  # [K, 1, vocab]
             else:
+                # Fallback: prompt shorter than one page, no shared pages for cascade
                 self.flashinferWrapper.prepareAttention(
                     'decode',
                     batch_position,
