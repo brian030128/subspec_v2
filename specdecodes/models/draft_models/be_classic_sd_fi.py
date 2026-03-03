@@ -107,7 +107,7 @@ class ClassicSDDraftModel(DraftModelBase):
     def init_cuda_graph_runner(self, device: torch.device):
         """Capture a CUDA graph for the beam decode forward (K beams, 1 token each)."""
         print("be_classic_sd_fi: Initializing CUDA Graph runner for beam decode...")
-        if hasattr(self, "beam_graph"):
+        if hasattr(self, "beam_graph") or hasattr(self, "beam_cascade_graph"):
             return
 
         self.model.eval()
@@ -116,12 +116,13 @@ class ClassicSDDraftModel(DraftModelBase):
         max_num_pages = kvCachePool.max_pages
         PAGE_SIZE = kvCachePool.page_len
         dtype = kvCachePool.cache_data[0].dtype
+        num_shared_pages = getattr(self, 'num_shared_pages', 0)
 
         # ── Model input staging buffers ──
         self.beam_input_ids_buf    = torch.zeros((K, 1), dtype=torch.long, device=device)
         self.beam_position_ids_buf = torch.zeros((K, 1), dtype=torch.long, device=device)
 
-        # ── Batch position staging buffers ──
+        # ── Batch position staging buffers (for KV append, used by both paths) ──
         self.beam_kv_page_indptr_buf    = torch.zeros(K + 1, dtype=torch.int32, device=device)
         self.beam_kv_page_indices_buf   = torch.zeros(max_num_pages, dtype=torch.int32, device=device)
         self.beam_kv_last_page_len_buf  = torch.zeros(K, dtype=torch.int32, device=device)
@@ -138,43 +139,97 @@ class ClassicSDDraftModel(DraftModelBase):
             positions        = self.beam_positions_buf,
         )
 
-        # ── Reinit decode wrapper with CUDA graph support ──
-        self.flashinferWrapper.init_cuda_graph_decode(K, max_num_pages, device)
+        if num_shared_pages > 0:
+            # ── Cascade graph path ──
+            self.flashinferWrapper.init_cuda_graph_cascade_decode(
+                K, max_num_pages, num_shared_pages, PAGE_SIZE, device)
+            # Also need flat decode wrapper for KV append (init without CUDA graph)
+            self.flashinferWrapper.init_cuda_graph_decode(K, max_num_pages, device)
 
-        # ── Warmup + Capture ──
-        stream = torch.cuda.Stream(device=device)
-        stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(stream):
-            for _ in range(2):
+            stream = torch.cuda.Stream(device=device)
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                for _ in range(2):
+                    self.flashinferWrapper.prepareCascadeAttention(
+                        [self.flashinferWrapper.cascade_l0_qo_indptr_buf,
+                         self.flashinferWrapper.cascade_l1_qo_indptr_buf],
+                        [self.flashinferWrapper.cascade_l0_kv_page_indptr_buf,
+                         self.flashinferWrapper.cascade_l1_kv_page_indptr_buf],
+                        [self.flashinferWrapper.cascade_l0_kv_page_indices_buf,
+                         self.flashinferWrapper.cascade_l1_kv_page_indices_buf],
+                        [self.flashinferWrapper.cascade_l0_kv_last_page_len_buf,
+                         self.flashinferWrapper.cascade_l1_kv_last_page_len_buf],
+                        PAGE_SIZE, dtype,
+                    )
+                    self.flashinferWrapper.prepareAttention(
+                        'decode', self.beam_batch_position, PAGE_SIZE, "NONE", dtype)
+                    _ = self(
+                        self.beam_input_ids_buf, with_softmax=False,
+                        position_ids=self.beam_position_ids_buf,
+                        kvCachePool=kvCachePool, batch_position=self.beam_batch_position,
+                        mode='cascade_decode', flashinferWrapper=self.flashinferWrapper)
+
+                torch.cuda.current_stream().wait_stream(stream)
+                self.flashinferWrapper.prepareCascadeAttention(
+                    [self.flashinferWrapper.cascade_l0_qo_indptr_buf,
+                     self.flashinferWrapper.cascade_l1_qo_indptr_buf],
+                    [self.flashinferWrapper.cascade_l0_kv_page_indptr_buf,
+                     self.flashinferWrapper.cascade_l1_kv_page_indptr_buf],
+                    [self.flashinferWrapper.cascade_l0_kv_page_indices_buf,
+                     self.flashinferWrapper.cascade_l1_kv_page_indices_buf],
+                    [self.flashinferWrapper.cascade_l0_kv_last_page_len_buf,
+                     self.flashinferWrapper.cascade_l1_kv_last_page_len_buf],
+                    PAGE_SIZE, dtype,
+                )
                 self.flashinferWrapper.prepareAttention(
                     'decode', self.beam_batch_position, PAGE_SIZE, "NONE", dtype)
-                _ = self(
-                    self.beam_input_ids_buf, with_softmax=False,
-                    position_ids=self.beam_position_ids_buf,
-                    kvCachePool=kvCachePool, batch_position=self.beam_batch_position,
-                    mode='decode', flashinferWrapper=self.flashinferWrapper)
+                cg = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(cg, stream=stream):
+                    self.beam_output_buffer = self(
+                        self.beam_input_ids_buf, with_softmax=False,
+                        position_ids=self.beam_position_ids_buf,
+                        kvCachePool=kvCachePool, batch_position=self.beam_batch_position,
+                        mode='cascade_decode', flashinferWrapper=self.flashinferWrapper)
 
-            torch.cuda.current_stream().wait_stream(stream)
-            self.flashinferWrapper.prepareAttention(
-                'decode', self.beam_batch_position, PAGE_SIZE, "NONE", dtype)
-            cg = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(cg, stream=stream):
-                self.beam_output_buffer = self(
-                    self.beam_input_ids_buf, with_softmax=False,
-                    position_ids=self.beam_position_ids_buf,
-                    kvCachePool=kvCachePool, batch_position=self.beam_batch_position,
-                    mode='decode', flashinferWrapper=self.flashinferWrapper)
+            self.beam_cascade_graph = cg
+            print("be_classic_sd_fi: Finished capturing beam cascade decode CUDA graph")
+        else:
+            # ── Flat decode graph path (prompt < 1 page, no shared pages) ──
+            self.flashinferWrapper.init_cuda_graph_decode(K, max_num_pages, device)
 
-        self.beam_graph = cg
-        print("be_classic_sd_fi: Finished capturing beam decode CUDA graph")
+            stream = torch.cuda.Stream(device=device)
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                for _ in range(2):
+                    self.flashinferWrapper.prepareAttention(
+                        'decode', self.beam_batch_position, PAGE_SIZE, "NONE", dtype)
+                    _ = self(
+                        self.beam_input_ids_buf, with_softmax=False,
+                        position_ids=self.beam_position_ids_buf,
+                        kvCachePool=kvCachePool, batch_position=self.beam_batch_position,
+                        mode='decode', flashinferWrapper=self.flashinferWrapper)
+
+                torch.cuda.current_stream().wait_stream(stream)
+                self.flashinferWrapper.prepareAttention(
+                    'decode', self.beam_batch_position, PAGE_SIZE, "NONE", dtype)
+                cg = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(cg, stream=stream):
+                    self.beam_output_buffer = self(
+                        self.beam_input_ids_buf, with_softmax=False,
+                        position_ids=self.beam_position_ids_buf,
+                        kvCachePool=kvCachePool, batch_position=self.beam_batch_position,
+                        mode='decode', flashinferWrapper=self.flashinferWrapper)
+
+            self.beam_graph = cg
+            print("be_classic_sd_fi: Finished capturing beam decode CUDA graph")
 
     def beam_decode_step(self, beam_input_ids, beam_position_ids, batch_position):
-        """Copy data into staging buffers, re-plan, and replay the captured graph."""
+        """Copy data into staging buffers, re-plan, and replay the captured flat decode graph."""
         # Copy model inputs
         self.beam_input_ids_buf.copy_(beam_input_ids)
         self.beam_position_ids_buf.copy_(beam_position_ids)
 
-        # Copy batch position
+        # Copy batch position (for KV append)
         self.beam_kv_page_indptr_buf.copy_(batch_position.kv_page_indptr)
         n_indices = batch_position.kv_page_indptr[-1].item()
         self.beam_kv_page_indices_buf[:n_indices].copy_(batch_position.kv_page_indices[:n_indices])
@@ -189,6 +244,51 @@ class ClassicSDDraftModel(DraftModelBase):
 
         # Replay
         self.beam_graph.replay()
+        return self.beam_output_buffer
+
+    def beam_cascade_decode_step(self, beam_input_ids, beam_position_ids,
+                                  batch_position, cascade_data):
+        """Copy cascade + append data into staging buffers, re-plan, and replay cascade graph."""
+        fw = self.flashinferWrapper
+
+        # Copy model inputs
+        self.beam_input_ids_buf.copy_(beam_input_ids)
+        self.beam_position_ids_buf.copy_(beam_position_ids)
+
+        # Copy batch position staging (for KV append inside graph)
+        self.beam_kv_page_indptr_buf.copy_(batch_position.kv_page_indptr)
+        n_indices = batch_position.kv_page_indptr[-1].item()
+        self.beam_kv_page_indices_buf[:n_indices].copy_(batch_position.kv_page_indices[:n_indices])
+        self.beam_kv_last_page_len_buf.copy_(batch_position.kv_last_page_len)
+        self.beam_positions_buf.copy_(batch_position.positions)
+
+        # Copy cascade level 0 (shared pages) — indptr and last_page_len are fixed,
+        # only page indices change between speculate() calls
+        fw.cascade_l0_kv_page_indices_buf.copy_(cascade_data.kv_page_indices_arr[0])
+
+        # Copy cascade level 1 (unique pages)
+        fw.cascade_l1_kv_page_indptr_buf.copy_(cascade_data.kv_page_indptr_arr[1])
+        n_l1 = cascade_data.kv_page_indptr_arr[1][-1].item()
+        fw.cascade_l1_kv_page_indices_buf[:n_l1].copy_(cascade_data.kv_page_indices_arr[1][:n_l1])
+        fw.cascade_l1_kv_last_page_len_buf.copy_(cascade_data.kv_last_page_len_arr[1])
+
+        # Re-plan cascade attention (outside graph)
+        fw.prepareCascadeAttention(
+            [fw.cascade_l0_qo_indptr_buf, fw.cascade_l1_qo_indptr_buf],
+            [fw.cascade_l0_kv_page_indptr_buf, fw.cascade_l1_kv_page_indptr_buf],
+            [fw.cascade_l0_kv_page_indices_buf, fw.cascade_l1_kv_page_indices_buf],
+            [fw.cascade_l0_kv_last_page_len_buf, fw.cascade_l1_kv_last_page_len_buf],
+            self.kvCachePool.page_len,
+            self.kvCachePool.cache_data[0].dtype,
+        )
+        # Re-plan flat decode (for KV append inside graph)
+        fw.prepareAttention(
+            'decode', self.beam_batch_position,
+            self.kvCachePool.page_len, "NONE",
+            self.kvCachePool.cache_data[0].dtype)
+
+        # Replay
+        self.beam_cascade_graph.replay()
         return self.beam_output_buffer
 
     def forward(self, input_ids, with_softmax=False, *model_args, **kwargs):
@@ -266,6 +366,7 @@ class ClassicSDDraftModel(DraftModelBase):
         kv_len += input_len
         org_kv_len = kv_len
         num_shared_pages = org_kv_len // PAGE_SIZE  # fully-filled prompt pages for cascade level 0
+        self.num_shared_pages = num_shared_pages
 
         # --- Init tree (root = last input token, same as original) ---
         tree = Tree(input_ids[0, -1], dtype)
@@ -338,7 +439,12 @@ class ClassicSDDraftModel(DraftModelBase):
             )
             beam_position_ids = torch.full((K, 1), current_pos, dtype=torch.long, device=device)
 
-            if hasattr(self, 'beam_graph'):
+            if hasattr(self, 'beam_cascade_graph'):
+                cascade_data = _build_cascade_data(
+                    beam_pages_list, num_shared_pages, current_pos, PAGE_SIZE, device)
+                logits = self.beam_cascade_decode_step(
+                    beam_input_ids, beam_position_ids, batch_position, cascade_data)
+            elif hasattr(self, 'beam_graph'):
                 logits = self.beam_decode_step(beam_input_ids, beam_position_ids, batch_position)
             elif num_shared_pages > 0:
                 # Cascade path: split shared prompt pages (level 0) from unique pages (level 1)
