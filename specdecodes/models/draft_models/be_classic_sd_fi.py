@@ -142,7 +142,7 @@ class ClassicSDDraftModel(DraftModelBase):
         if num_shared_pages > 0:
             # ── Cascade graph path ──
             self.flashinferWrapper.init_cuda_graph_cascade_decode(
-                K, max_num_pages, num_shared_pages, PAGE_SIZE, device)
+                K, max_num_pages, PAGE_SIZE, device)
             # Also need flat decode wrapper for KV append (init without CUDA graph)
             self.flashinferWrapper.init_cuda_graph_decode(K, max_num_pages, device)
 
@@ -262,9 +262,11 @@ class ClassicSDDraftModel(DraftModelBase):
         self.beam_kv_last_page_len_buf.copy_(batch_position.kv_last_page_len)
         self.beam_positions_buf.copy_(batch_position.positions)
 
-        # Copy cascade level 0 (shared pages) — indptr and last_page_len are fixed,
-        # only page indices change between speculate() calls
-        fw.cascade_l0_kv_page_indices_buf.copy_(cascade_data.kv_page_indices_arr[0])
+        # Copy cascade level 0 (shared pages) — qo_indptr and last_page_len are fixed,
+        # indptr and page indices vary per prompt
+        n_l0 = cascade_data.kv_page_indptr_arr[0][-1].item()
+        fw.cascade_l0_kv_page_indptr_buf.copy_(cascade_data.kv_page_indptr_arr[0])
+        fw.cascade_l0_kv_page_indices_buf[:n_l0].copy_(cascade_data.kv_page_indices_arr[0][:n_l0])
 
         # Copy cascade level 1 (unique pages)
         fw.cascade_l1_kv_page_indptr_buf.copy_(cascade_data.kv_page_indptr_arr[1])

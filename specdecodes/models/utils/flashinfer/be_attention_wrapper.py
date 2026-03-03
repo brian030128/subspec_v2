@@ -81,15 +81,16 @@ class BeFlashinferWrapper:
             num_levels, _workspace_buffer, "NHD"
         )
 
-    def init_cuda_graph_cascade_decode(self, K, max_num_pages, num_shared_pages, page_size, device):
+    def init_cuda_graph_cascade_decode(self, K, max_num_pages, page_size, device):
         """Reinitialize cascade_wrapper with use_cuda_graph=True and pre-allocated buffers."""
         _workspace_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.int8, device=device)
         i32 = torch.int32
 
         # Level 0 (shared prompt) staging buffers — 1 KV sequence seen by all K queries
+        # Sized at max_num_pages so any prompt length works; actual count set via indptr each step
         self.cascade_l0_qo_indptr_buf = torch.tensor([0, K], dtype=i32, device=device)
-        self.cascade_l0_kv_page_indptr_buf = torch.tensor([0, num_shared_pages], dtype=i32, device=device)
-        self.cascade_l0_kv_page_indices_buf = torch.zeros(num_shared_pages, dtype=i32, device=device)
+        self.cascade_l0_kv_page_indptr_buf = torch.zeros(2, dtype=i32, device=device)
+        self.cascade_l0_kv_page_indices_buf = torch.zeros(max_num_pages, dtype=i32, device=device)
         self.cascade_l0_kv_last_page_len_buf = torch.tensor([page_size], dtype=i32, device=device)
 
         # Level 1 (per-beam unique) staging buffers — K sequences
