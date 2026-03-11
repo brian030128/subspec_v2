@@ -12,6 +12,7 @@ class DraftParams:
     topk_len: int = 10
     max_verify_tokens: int = None
     page_len: int = 1
+    use_cascade: bool = True
     
     def __post_init__(self):
         self.max_sample_tokens = self.max_depth * self.topk_len + 1
