@@ -1,4 +1,5 @@
 import torch
+import torch.profiler
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from tqdm import trange
 import logging
@@ -60,11 +61,19 @@ def main(builder):
     print("Generating response...")
     torch.cuda.cudart().cudaProfilerStart() # start profiling from here
     start_event.record()
-    with nvtx.annotate("Generate"):
-        with sdpa_kernel(backends=[SDPBackend.MATH]):
-            output_ids = generator.generate(input_ids, temperature=args.temperature, max_length=args.max_length, do_sample=args.do_sample, past_key_values=past_kv, draft_past_key_values=draft_past_kv)
+    with torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ],
+        record_shapes=True,
+        with_stack=True,
+    ) as prof:
+        with nvtx.annotate("Generate"):
+            with sdpa_kernel(backends=[SDPBackend.MATH]):
+                output_ids = generator.generate(input_ids, temperature=args.temperature, max_length=args.max_length, do_sample=args.do_sample, past_key_values=past_kv, draft_past_key_values=draft_past_kv)
     end_event.record()
-    
+
     # Ensure all CUDA kernels are done.
     torch.cuda.synchronize()
     torch.cuda.cudart().cudaProfilerStop()
@@ -90,6 +99,9 @@ def main(builder):
     with open(log_file, "a+", encoding="utf-8") as f:
         json.dump(exp_log, f, indent=4)
         f.write("\n")
+    trace_path = os.path.join(log_dir, "trace.json")
+    prof.export_chrome_trace(trace_path)
+    print(f"Perfetto trace: {trace_path}")
     print(f"Log directory: {log_dir}")
 
     if args.print_message:
