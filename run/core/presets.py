@@ -94,11 +94,11 @@ def be_classic_sd_fi_load_kv_cache(builder, target_model, draft_model):
     max_pages = (K + max_depth) * pages_for_seq
 
     draft_past_key_values = KvCachePool(
-        max_pages=max_pages,
+        max_pages=K + max_depth,
         num_layers=config.num_hidden_layers,
         num_heads=config.num_key_value_heads,
         head_dim=head_dim,
-        page_len=page_len,
+        page_len=max_cache_len,
         dtype=torch.float16,
         device=currentDevice,
     )
