@@ -29,3 +29,4 @@ draft_params:
   max_depth: 8
   topk_len: 6
   page_len: 1
+  use_cascade: true

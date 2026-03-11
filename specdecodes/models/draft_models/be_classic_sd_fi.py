@@ -326,7 +326,8 @@ class ClassicSDDraftModel(DraftModelBase):
                 self.model.config.hidden_size,
                 request_kv_cache.kvCachePool.page_len,
             )
-            self.flashinferWrapper.init_cascade_decode(2)
+            if getattr(self.draft_params, 'use_cascade', True):
+                self.flashinferWrapper.init_cascade_decode(2)
         self.kvCachePool = request_kv_cache.kvCachePool
 
         K = self.draft_params.topk_len
@@ -368,6 +369,9 @@ class ClassicSDDraftModel(DraftModelBase):
         kv_len += input_len
         org_kv_len = kv_len
         num_shared_pages = org_kv_len // PAGE_SIZE  # fully-filled prompt pages for cascade level 0
+        use_cascade = getattr(self.draft_params, 'use_cascade', True)
+        if not use_cascade:
+            num_shared_pages = 0
         self.num_shared_pages = num_shared_pages
 
         # --- Init tree (root = last input token, same as original) ---
